@@ -31,3 +31,54 @@
 .tr-small {
     font-size: small;
 }
+
+.tr-workarea row {
+    margin: 0;
+    padding: 3px;
+}
+
+row .tr-list-item label {
+    margin: 0;
+    padding: 0;
+}
+
+row .tr-list-item.tr-compact progressbar trough {
+    min-width: 50px;
+}
+
+row .tr-list-item.tr-compact progressbar trough,
+row .tr-list-item.tr-compact progressbar progress {
+    min-height: 3px;
+}
+
+row .tr-list-item.tr-compact .tr-status {
+    margin-left: 3px;
+    margin-right: 3px;
+}
+
+row .tr-list-item.tr-full progressbar trough,
+row .tr-list-item.tr-full progressbar progress {
+    min-height: 10px;
+}
+
+row .tr-list-item.tr-transfer-down progressbar progress {
+    background-image: none;
+    background-color: steelblue;
+    border-color: steelblue;
+}
+
+row .tr-list-item.tr-transfer-up progressbar progress {
+    background-image: none;
+    background-color: forestgreen;
+    border-color: forestgreen;
+}
+
+row .tr-list-item.tr-transfer-idle progressbar progress {
+    background-image: none;
+    background-color: silver;
+    border-color: silver;
+}
+
+row:not(:selected) .tr-list-item.tr-error label {
+    color: red;
+}

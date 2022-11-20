@@ -49,6 +49,7 @@
 #include "Session.h"
 #include "StatsDialog.h"
 #include "SystemTrayIcon.h"
+#include "Torrent.h"
 #include "Utils.h"
 
 using namespace std::literals;
@@ -136,7 +137,7 @@ private:
     void toggleMainWindow();
 
     bool winclose();
-    void rowChangedCB(Gtk::TreePath const& path, Gtk::TreeModel::iterator const& iter);
+    void rowChangedCB(Torrent::ChangeFlags flags);
 
     void app_setup();
     void main_window_setup();
@@ -157,12 +158,11 @@ private:
     void on_prefs_changed(tr_quark key);
 
     [[nodiscard]] std::vector<tr_torrent_id_t> get_selected_torrent_ids() const;
-    [[nodiscard]] tr_torrent* get_first_selected_torrent() const;
     [[nodiscard]] counts_data get_selected_torrent_counts() const;
 
     void start_all_torrents();
     void pause_all_torrents();
-    void copy_magnet_link_to_clipboard(tr_torrent* tor) const;
+    void copy_magnet_link_to_clipboard(Torrent const& torrent) const;
     bool call_rpc_for_selected_torrents(std::string const& method);
     void remove_selected(bool delete_files);
 
@@ -194,7 +194,6 @@ private:
     std::vector<std::string> error_list_;
     std::vector<std::string> duplicates_list_;
     std::map<std::string, std::unique_ptr<DetailsDialog>> details_;
-    Glib::RefPtr<Gtk::TreeSelection> sel_;
 };
 
 namespace
@@ -232,8 +231,7 @@ std::string get_details_dialog_key(std::vector<tr_torrent_id_t> const& id_list)
 std::vector<tr_torrent_id_t> Application::Impl::get_selected_torrent_ids() const
 {
     std::vector<tr_torrent_id_t> ids;
-    sel_->selected_foreach([&ids](auto const& /*path*/, auto const& iter)
-                           { ids.push_back(iter->get_value(torrent_cols.torrent_id)); });
+    wind_->for_each_selected_torrent([&ids](auto const& torrent) { ids.push_back(torrent->get_id()); });
     return ids;
 }
 
@@ -266,12 +264,12 @@ Application::Impl::counts_data Application::Impl::get_selected_torrent_counts() 
 {
     counts_data counts;
 
-    sel_->selected_foreach(
-        [&counts](auto const& /*path*/, auto const& iter)
+    wind_->for_each_selected_torrent(
+        [&counts](auto const& torrent)
         {
             ++counts.total_count;
 
-            auto const activity = iter->get_value(torrent_cols.activity);
+            auto const activity = torrent->get_activity();
 
             if (activity == TR_STATUS_DOWNLOAD_WAIT || activity == TR_STATUS_SEED_WAIT)
             {
@@ -293,7 +291,7 @@ bool Application::Impl::refresh_actions()
     {
         size_t const total = core_->get_torrent_count();
         size_t const active = core_->get_active_torrent_count();
-        auto const torrent_count = core_->get_model()->children().size();
+        auto const torrent_count = core_->get_model()->get_n_items();
 
         auto const sel_counts = get_selected_torrent_counts();
         bool const has_selection = sel_counts.total_count > 0;
@@ -319,12 +317,8 @@ bool Application::Impl::refresh_actions()
         gtr_action_set_sensitive("copy-magnet-link-to-clipboard", sel_counts.total_count == 1);
 
         bool canUpdate = false;
-        sel_->selected_foreach(
-            [&canUpdate](auto const& /*path*/, auto const& iter)
-            {
-                auto const* tor = static_cast<tr_torrent const*>(iter->get_value(torrent_cols.torrent));
-                canUpdate = canUpdate || tr_torrentCanManualUpdate(tor);
-            });
+        wind_->for_each_selected_torrent([&canUpdate](auto const& torrent)
+                                         { canUpdate = canUpdate || tr_torrentCanManualUpdate(&torrent->get_torrent()); });
         gtr_action_set_sensitive("torrent-reannounce", canUpdate);
     }
 
@@ -844,9 +838,9 @@ bool Application::Impl::winclose()
     return true; /* don't propagate event further */
 }
 
-void Application::Impl::rowChangedCB(Gtk::TreePath const& path, Gtk::TreeModel::iterator const& /*iter*/)
+void Application::Impl::rowChangedCB(Torrent::ChangeFlags flags)
 {
-    if (sel_->is_selected(path))
+    if (flags.test(Torrent::ChangeFlag::ACTIVITY))
     {
         refresh_actions_soon();
     }
@@ -912,14 +906,9 @@ void Application::Impl::on_drag_data_received(
 
 void Application::Impl::main_window_setup()
 {
-    // g_assert(nullptr == cbdata->wind);
-    // cbdata->wind = wind;
-    sel_ = wind_->get_selection();
-
-    sel_->signal_changed().connect(sigc::mem_fun(*this, &Impl::refresh_actions_soon));
+    wind_->signal_selection_changed().connect(sigc::mem_fun(*this, &Impl::refresh_actions_soon));
     refresh_actions_soon();
-    auto const model = core_->get_model();
-    model->signal_row_changed().connect(sigc::mem_fun(*this, &Impl::rowChangedCB));
+    core_->signal_torrents_changed().connect(sigc::mem_fun(*this, &Impl::rowChangedCB));
     gtr_window_on_close(*wind_, sigc::mem_fun(*this, &Impl::winclose));
     refresh_actions();
 
@@ -1428,12 +1417,7 @@ bool Application::Impl::call_rpc_for_selected_torrents(std::string const& method
     tr_variantDictAddStrView(&top, TR_KEY_method, method);
     auto* const args = tr_variantDictAddDict(&top, TR_KEY_arguments, 1);
     auto* const ids = tr_variantDictAddList(args, TR_KEY_ids, 0);
-    sel_->selected_foreach(
-        [ids](auto const& /*path*/, auto const& iter)
-        {
-            auto const* const tor = static_cast<tr_torrent*>(iter->get_value(torrent_cols.torrent));
-            tr_variantListAddInt(ids, tr_torrentId(tor));
-        });
+    wind_->for_each_selected_torrent([ids](auto const& torrent) { tr_variantListAddInt(ids, torrent->get_id()); });
 
     if (tr_variantListSize(ids) != 0)
     {
@@ -1449,8 +1433,7 @@ void Application::Impl::remove_selected(bool delete_files)
 {
     auto l = std::vector<tr_torrent_id_t>{};
 
-    sel_->selected_foreach([&l](auto const& /*path*/, auto const& iter)
-                           { l.push_back(iter->get_value(torrent_cols.torrent_id)); });
+    wind_->for_each_selected_torrent([&l](auto const& torrent) { l.push_back(torrent->get_id()); });
 
     if (!l.empty())
     {
@@ -1480,25 +1463,9 @@ void Application::Impl::pause_all_torrents()
     tr_variantClear(&request);
 }
 
-tr_torrent* Application::Impl::get_first_selected_torrent() const
+void Application::Impl::copy_magnet_link_to_clipboard(Torrent const& torrent) const
 {
-    tr_torrent* tor = nullptr;
-    Glib::RefPtr<Gtk::TreeModel> m;
-
-    if (auto const l = sel_->get_selected_rows(m); !l.empty())
-    {
-        if (auto iter = m->get_iter(l.front()); iter)
-        {
-            tor = static_cast<tr_torrent*>(iter->get_value(torrent_cols.torrent));
-        }
-    }
-
-    return tor;
-}
-
-void Application::Impl::copy_magnet_link_to_clipboard(tr_torrent* tor) const
-{
-    auto const magnet = tr_torrentGetMagnetLink(tor);
+    auto const magnet = tr_torrentGetMagnetLink(&torrent.get_torrent());
     auto const display = wind_->get_display();
 
     /* this is The Right Thing for copy/paste... */
@@ -1550,11 +1517,9 @@ void Application::Impl::actions_handler(Glib::ustring const& action_name)
     }
     else if (action_name == "copy-magnet-link-to-clipboard")
     {
-        tr_torrent* tor = get_first_selected_torrent();
-
-        if (tor != nullptr)
+        if (auto const torrent = wind_->get_first_selected_torrent(); torrent != nullptr)
         {
-            copy_magnet_link_to_clipboard(tor);
+            copy_magnet_link_to_clipboard(*torrent);
         }
     }
     else if (action_name == "relocate-torrent")
@@ -1577,8 +1542,7 @@ void Application::Impl::actions_handler(Glib::ustring const& action_name)
     }
     else if (action_name == "open-torrent-folder")
     {
-        sel_->selected_foreach([this](auto const& /*path*/, auto const& iter)
-                               { core_->open_folder(iter->get_value(torrent_cols.torrent_id)); });
+        wind_->for_each_selected_torrent([this](auto const& torrent) { core_->open_folder(torrent->get_id()); });
     }
     else if (action_name == "show-torrent-properties")
     {
@@ -1604,11 +1568,11 @@ void Application::Impl::actions_handler(Glib::ustring const& action_name)
     }
     else if (action_name == "select-all")
     {
-        sel_->select_all();
+        wind_->select_all();
     }
     else if (action_name == "deselect-all")
     {
-        sel_->unselect_all();
+        wind_->unselect_all();
     }
     else if (action_name == "edit-preferences")
     {

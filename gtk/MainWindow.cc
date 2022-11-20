@@ -13,13 +13,17 @@
 
 #include "Actions.h"
 #include "FilterBar.h"
-#include "HigWorkarea.h" // GUI_PAD_SMALL
+#include "ListModelAdapter.h"
 #include "MainWindow.h"
 #include "Prefs.h"
 #include "PrefsDialog.h"
 #include "Session.h"
-#include "TorrentCellRenderer.h"
+#include "Torrent.h"
 #include "Utils.h"
+
+#if !GTKMM_CHECK_VERSION(4, 0, 0)
+#include "TorrentCellRenderer.h"
+#endif
 
 using namespace std::string_literals;
 using namespace std::string_view_literals;
@@ -45,6 +49,8 @@ class MainWindow::Impl
         Glib::RefPtr<Gio::Menu> section;
     };
 
+    using TorrentView = IF_GTKMM4(Gtk::ListView, Gtk::TreeView);
+
 public:
     Impl(
         MainWindow& window,
@@ -55,14 +61,23 @@ public:
 
     TR_DISABLE_COPY_MOVE(Impl)
 
+#if GTKMM_CHECK_VERSION(4, 0, 0)
+    [[nodiscard]] Glib::RefPtr<Gtk::MultiSelection> get_selection_model() const;
+#else
     [[nodiscard]] Glib::RefPtr<Gtk::TreeSelection> get_selection() const;
+#endif
 
     void refresh();
 
     void prefsChanged(tr_quark key);
 
+    auto& signal_selection_changed()
+    {
+        return signal_selection_changed_;
+    }
+
 private:
-    void init_view(Gtk::TreeView* view, Glib::RefPtr<Gtk::TreeModel> const& model);
+    void init_view(TorrentView* view, Glib::RefPtr<FilterBar::Model> const& model);
 
     Glib::RefPtr<Gio::MenuModel> createOptionsMenu();
     Glib::RefPtr<Gio::MenuModel> createSpeedMenu(Glib::RefPtr<Gio::SimpleActionGroup> const& actions, tr_direction dir);
@@ -92,14 +107,25 @@ private:
     MainWindow& window_;
     Glib::RefPtr<Session> const core_;
 
+    sigc::signal<void()> signal_selection_changed_;
+
     Glib::RefPtr<Gio::ActionGroup> options_actions_;
     Glib::RefPtr<Gio::ActionGroup> stats_actions_;
 
     std::array<OptionMenuInfo, 2> speed_menu_info_;
     OptionMenuInfo ratio_menu_info_;
 
+#if GTKMM_CHECK_VERSION(4, 0, 0)
+    Glib::RefPtr<Gtk::ListItemFactory> item_factory_compact_;
+    Glib::RefPtr<Gtk::ListItemFactory> item_factory_full_;
+    Glib::RefPtr<Gtk::MultiSelection> selection_model_;
+#else
+    TorrentCellRenderer* renderer_ = nullptr;
+    Gtk::TreeViewColumn* column_ = nullptr;
+#endif
+
     Gtk::ScrolledWindow* scroll_ = nullptr;
-    Gtk::TreeView* view_ = nullptr;
+    TorrentView* view_ = nullptr;
     Gtk::Widget* toolbar_ = nullptr;
     FilterBar* filter_;
     Gtk::Widget* status_ = nullptr;
@@ -108,8 +134,6 @@ private:
     Gtk::Label* stats_lb_ = nullptr;
     Gtk::Image* alt_speed_image_ = nullptr;
     Gtk::ToggleButton* alt_speed_button_ = nullptr;
-    TorrentCellRenderer* renderer_ = nullptr;
-    Gtk::TreeViewColumn* column_ = nullptr;
     sigc::connection pref_handler_id_;
     IF_GTKMM4(Gtk::PopoverMenu*, Gtk::Menu*) popup_menu_ = nullptr;
 };
@@ -136,12 +160,9 @@ void MainWindow::Impl::on_popup_menu([[maybe_unused]] double event_x, [[maybe_un
     }
 
 #if GTKMM_CHECK_VERSION(4, 0, 0)
-    int view_x = 0;
-    int view_y = 0;
-    view_->convert_bin_window_to_widget_coords(static_cast<int>(event_x), static_cast<int>(event_y), view_x, view_y);
     double window_x = 0;
     double window_y = 0;
-    view_->translate_coordinates(window_, view_x, view_y, window_x, window_y);
+    view_->translate_coordinates(window_, event_x, event_y, window_x, window_y);
     popup_menu_->set_pointing_to(Gdk::Rectangle(window_x, window_y, 1, 1));
     popup_menu_->popup();
 #else
@@ -152,20 +173,80 @@ void MainWindow::Impl::on_popup_menu([[maybe_unused]] double event_x, [[maybe_un
 namespace
 {
 
+#if GTKMM_CHECK_VERSION(4, 0, 0)
+
+GStrv append_string_to_list(GObject* /*object*/, GStrv list, char const* string)
+{
+    auto* const builder = g_strv_builder_new();
+    if (builder == nullptr)
+    {
+        return nullptr;
+    }
+
+    g_strv_builder_addv(builder, const_cast<const char**>(list));
+    g_strv_builder_add(builder, string);
+
+    return g_strv_builder_end(builder);
+}
+
+#else
+
 bool tree_view_search_equal_func(
     Glib::RefPtr<Gtk::TreeModel> const& /*model*/,
     int /*column*/,
     Glib::ustring const& key,
     Gtk::TreeModel::const_iterator const& iter)
 {
-    auto const name = iter->get_value(torrent_cols.name_collated);
+    static auto const& self_col = Torrent::get_columns().self;
+
+    auto const name = iter->get_value(self_col)->get_name_collated();
     return name.find(key.lowercase()) == Glib::ustring::npos;
 }
 
+#endif
+
 } // namespace
 
-void MainWindow::Impl::init_view(Gtk::TreeView* view, Glib::RefPtr<Gtk::TreeModel> const& model)
+void MainWindow::Impl::init_view(TorrentView* view, Glib::RefPtr<FilterBar::Model> const& model)
 {
+#if GTKMM_CHECK_VERSION(4, 0, 0)
+    auto const create_builder_list_item_factory = [](std::string const& filename)
+    {
+        auto builder_scope = Glib::wrap(G_OBJECT(gtk_builder_cscope_new()));
+        gtk_builder_cscope_add_callback(GTK_BUILDER_CSCOPE(builder_scope->gobj()), append_string_to_list);
+
+        return Glib::wrap(gtk_builder_list_item_factory_new_from_resource(
+            GTK_BUILDER_SCOPE(builder_scope->gobj()),
+            gtr_get_full_resource_path(filename).c_str()));
+    };
+
+    setup_list_view_button_event_handling(
+        *view,
+        [this, view](guint /*button*/, TrGdkModifierType /*state*/, double view_x, double view_y, bool context_menu_requested)
+        {
+            return on_list_view_button_pressed(
+                *view,
+                view_x,
+                view_y,
+                context_menu_requested,
+                sigc::mem_fun(*this, &Impl::on_popup_menu));
+        },
+        [view](double view_x, double view_y) { return on_list_view_button_released(*view, view_x, view_y); });
+
+    item_factory_compact_ = create_builder_list_item_factory("TorrentListItemCompact.ui"s);
+    item_factory_full_ = create_builder_list_item_factory("TorrentListItemFull.ui"s);
+
+    view->signal_activate().connect([](guint /*position*/) { gtr_action_activate("show-torrent-properties"); });
+
+    selection_model_ = Gtk::MultiSelection::create(model);
+    selection_model_->signal_selection_changed().connect([this](guint /*position*/, guint /*n_items*/)
+                                                         { signal_selection_changed_.emit(); });
+
+    view->set_factory(gtr_pref_flag_get(TR_KEY_compact_view) ? item_factory_compact_ : item_factory_full_);
+    view->set_model(selection_model_);
+#else
+    static auto const& torrent_cols = Torrent::get_columns();
+
     view->set_search_column(torrent_cols.name_collated);
     view->set_search_equal_func(&tree_view_search_equal_func);
 
@@ -173,16 +254,9 @@ void MainWindow::Impl::init_view(Gtk::TreeView* view, Glib::RefPtr<Gtk::TreeMode
 
     renderer_ = Gtk::make_managed<TorrentCellRenderer>();
     column_->pack_start(*renderer_, false);
-    column_->add_attribute(renderer_->property_torrent(), torrent_cols.torrent);
-    column_->add_attribute(renderer_->property_piece_upload_speed(), torrent_cols.speed_up);
-    column_->add_attribute(renderer_->property_piece_download_speed(), torrent_cols.speed_down);
+    column_->add_attribute(renderer_->property_torrent(), torrent_cols.self);
 
-    renderer_->property_xpad() = GUI_PAD_SMALL;
-    renderer_->property_ypad() = GUI_PAD_SMALL;
-
-#if !GTKMM_CHECK_VERSION(4, 0, 0)
     view->signal_popup_menu().connect_notify([this]() { on_popup_menu(0, 0); });
-#endif
     setup_tree_view_button_event_handling(
         *view,
         [this, view](guint /*button*/, TrGdkModifierType /*state*/, double view_x, double view_y, bool context_menu_requested)
@@ -199,6 +273,9 @@ void MainWindow::Impl::init_view(Gtk::TreeView* view, Glib::RefPtr<Gtk::TreeMode
                                          { gtr_action_activate("show-torrent-properties"); });
 
     view->set_model(model);
+
+    view->get_selection()->signal_changed().connect([this]() { signal_selection_changed_.emit(); });
+#endif
 }
 
 void MainWindow::Impl::prefsChanged(tr_quark const key)
@@ -206,6 +283,9 @@ void MainWindow::Impl::prefsChanged(tr_quark const key)
     switch (key)
     {
     case TR_KEY_compact_view:
+#if GTKMM_CHECK_VERSION(4, 0, 0)
+        view_->set_factory(gtr_pref_flag_get(key) ? item_factory_compact_ : item_factory_full_);
+#else
         renderer_->property_compact() = gtr_pref_flag_get(key);
         /* since the cell size has changed, we need gtktreeview to revalidate
          * its fixed-height mode values. Unfortunately there's not an API call
@@ -214,6 +294,7 @@ void MainWindow::Impl::prefsChanged(tr_quark const key)
         view_->set_row_separator_func({});
         view_->unset_row_separator_func();
         view_->set_fixed_height_mode(true);
+#endif
         break;
 
     case TR_KEY_show_statusbar:
@@ -535,9 +616,9 @@ MainWindow::Impl::Impl(
     : window_(window)
     , core_(core)
     , scroll_(gtr_get_widget<Gtk::ScrolledWindow>(builder, "torrents_view_scroll"))
-    , view_(gtr_get_widget<Gtk::TreeView>(builder, "torrents_view"))
+    , view_(gtr_get_widget<TorrentView>(builder, "torrents_view"))
     , toolbar_(gtr_get_widget<Gtk::Widget>(builder, "toolbar"))
-    , filter_(gtr_get_widget_derived<FilterBar>(builder, "filterbar", core_->get_session(), core_->get_model()))
+    , filter_(gtr_get_widget_derived<FilterBar>(builder, "filterbar", core_))
     , status_(gtr_get_widget<Gtk::Widget>(builder, "statusbar"))
     , ul_lb_(gtr_get_widget<Gtk::Label>(builder, "upload_speed_label"))
     , dl_lb_(gtr_get_widget<Gtk::Label>(builder, "download_speed_label"))
@@ -678,12 +759,13 @@ void MainWindow::Impl::updateSpeeds()
         auto up_speed = double{};
 
         auto const model = core_->get_model();
-        for (auto const& row : model->children())
+        for (auto i = 0U, count = model->get_n_items(); i < count; ++i)
         {
-            dn_count += row.get_value(torrent_cols.active_peers_down);
-            dn_speed += row.get_value(torrent_cols.speed_down);
-            up_count += row.get_value(torrent_cols.active_peers_up);
-            up_speed += row.get_value(torrent_cols.speed_up);
+            auto const item = gtr_ptr_dynamic_cast<Torrent>(model->get_object(i));
+            dn_count += item->get_active_peers_down();
+            dn_speed += item->get_speed_down();
+            up_count += item->get_active_peers_up();
+            up_speed += item->get_speed_up();
         }
 
         dl_lb_->set_text(fmt::format(_("{download_speed} ▼"), fmt::arg("download_speed", tr_formatter_speed_KBps(dn_speed))));
@@ -708,14 +790,84 @@ void MainWindow::Impl::refresh()
     }
 }
 
-Glib::RefPtr<Gtk::TreeSelection> MainWindow::get_selection() const
+#if GTKMM_CHECK_VERSION(4, 0, 0)
+
+Glib::RefPtr<Gtk::MultiSelection> MainWindow::Impl::get_selection_model() const
 {
-    return impl_->get_selection();
+    return selection_model_;
 }
+
+#else
 
 Glib::RefPtr<Gtk::TreeSelection> MainWindow::Impl::get_selection() const
 {
     return view_->get_selection();
+}
+
+#endif
+
+Glib::RefPtr<Torrent> MainWindow::get_first_selected_torrent() const
+{
+    auto torrent = Glib::RefPtr<Torrent>();
+
+#if GTKMM_CHECK_VERSION(4, 0, 0)
+    auto const selection_model = impl_->get_selection_model();
+    auto const model = selection_model->get_model();
+
+    if (auto const selection = selection_model->get_selection(); !selection->is_empty())
+    {
+        torrent = gtr_ptr_dynamic_cast<Torrent>(model->get_object(selection->get_nth(0)));
+    }
+#else
+    static auto const& self_col = Torrent::get_columns().self;
+
+    Glib::RefPtr<Gtk::TreeModel> m;
+
+    if (auto const l = impl_->get_selection()->get_selected_rows(m); !l.empty())
+    {
+        if (auto iter = m->get_iter(l.front()); iter)
+        {
+            torrent = Glib::make_refptr_for_instance(iter->get_value(self_col));
+            torrent->reference();
+        }
+    }
+#endif
+
+    return torrent;
+}
+
+void MainWindow::for_each_selected_torrent(std::function<void(Glib::RefPtr<Torrent> const&)> callback) const
+{
+#if GTKMM_CHECK_VERSION(4, 0, 0)
+    auto const selection_model = impl_->get_selection_model();
+    auto const model = selection_model->get_model();
+
+    auto const selection = selection_model->get_selection(); // TODO(C++20): Move into the `for`
+    for (auto const position : *selection)
+    {
+        callback(gtr_ptr_dynamic_cast<Torrent>(model->get_object(position)));
+    }
+#else
+    static auto const& self_col = Torrent::get_columns().self;
+
+    impl_->get_selection()->selected_foreach(
+        [callback](auto const& /*path*/, auto const& iter)
+        {
+            auto const torrent = Glib::make_refptr_for_instance(iter->get_value(self_col));
+            torrent->reference();
+            callback(torrent);
+        });
+#endif
+}
+
+void MainWindow::select_all()
+{
+    impl_->IF_GTKMM4(get_selection_model(), get_selection())->select_all();
+}
+
+void MainWindow::unselect_all()
+{
+    impl_->IF_GTKMM4(get_selection_model(), get_selection())->unselect_all();
 }
 
 void MainWindow::set_busy(bool isBusy)
@@ -732,4 +884,9 @@ void MainWindow::set_busy(bool isBusy)
         display->flush();
 #endif
     }
+}
+
+sigc::signal<void()>& MainWindow::signal_selection_changed()
+{
+    return impl_->signal_selection_changed();
 }

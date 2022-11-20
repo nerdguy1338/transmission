@@ -12,30 +12,18 @@
 
 #include <libtransmission/tr-macros.h>
 
-#include "Utils.h"
-
+class Torrent;
 struct tr_torrent;
 
 class TorrentCellRenderer : public Gtk::CellRenderer
 {
-    using SnapshotPtr = IF_GTKMM4(Glib::RefPtr<Gtk::Snapshot>, Cairo::RefPtr<Cairo::Context>);
-
 public:
     TorrentCellRenderer();
     ~TorrentCellRenderer() override;
 
     TR_DISABLE_COPY_MOVE(TorrentCellRenderer)
 
-    Glib::PropertyProxy<gpointer> property_torrent();
-
-    /* Use this instead of tr_stat.pieceUploadSpeed so that the model can
-       control when the speed displays get updated. This is done to keep
-       the individual torrents' speeds and the status bar's overall speed
-       in sync even if they refresh at slightly different times */
-    Glib::PropertyProxy<double> property_piece_upload_speed();
-
-    /* @see property_piece_upload_speed */
-    Glib::PropertyProxy<double> property_piece_download_speed();
+    Glib::PropertyProxy<Torrent*> property_torrent();
 
     Glib::PropertyProxy<int> property_bar_height();
     Glib::PropertyProxy<bool> property_compact();
@@ -43,8 +31,8 @@ public:
 protected:
     void get_preferred_width_vfunc(Gtk::Widget& widget, int& minimum_width, int& natural_width) const override;
     void get_preferred_height_vfunc(Gtk::Widget& widget, int& minimum_height, int& natural_height) const override;
-    void IF_GTKMM4(snapshot_vfunc, render_vfunc)(
-        SnapshotPtr const& snapshot,
+    void render_vfunc(
+        Cairo::RefPtr<Cairo::Context> const& snapshot,
         Gtk::Widget& widget,
         Gdk::Rectangle const& background_area,
         Gdk::Rectangle const& cell_area,

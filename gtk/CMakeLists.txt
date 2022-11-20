@@ -38,6 +38,12 @@ set(${PROJECT_NAME}_UI_FILES
     ${UI_SUBDIR}/TorrentUrlChooserDialog.ui
 )
 
+if(GTK_VERSION EQUAL 4)
+    list(APPEND ${PROJECT_NAME}_UI_FILES
+        ${UI_SUBDIR}/TorrentListItemCompact.ui
+        ${UI_SUBDIR}/TorrentListItemFull.ui)
+endif()
+
 macro(gtr_compile_resources NAME INPUT_DIR INPUT_FILE OUTPUT_FILE_BASE)
     add_custom_command(
         OUTPUT
@@ -108,6 +114,7 @@ set(${PROJECT_NAME}_SOURCES
     FilterBar.cc
     FreeSpaceLabel.cc
     IconCache.cc
+    ListModelAdapter.cc
     main.cc
     MainWindow.cc
     MakeDialog.cc
@@ -121,23 +128,34 @@ set(${PROJECT_NAME}_SOURCES
     Session.cc
     StatsDialog.cc
     SystemTrayIcon.cc
+    Torrent.cc
     TorrentCellRenderer.cc
+    TorrentFilter.cc
+    TorrentSorter.cc
     Utils.cc
     ${CMAKE_CURRENT_BINARY_DIR}/transmission-resources.c
     ${CMAKE_CURRENT_BINARY_DIR}/transmission-ui-resources.c
 )
+
+if(GTK_VERSION EQUAL 4)
+    set_property(
+        SOURCE TorrentCellRenderer.cc
+        PROPERTY HEADER_FILE_ONLY ON)
+endif()
 
 set(${PROJECT_NAME}_HEADERS
     Actions.h
     Application.h
     DetailsDialog.h
     Dialogs.h
+    DynamicProperty.h
     FaviconCache.h
     FileList.h
     FilterBar.h
     FreeSpaceLabel.h
     HigWorkarea.h
     IconCache.h
+    ListModelAdapter.h
     MainWindow.h
     MakeDialog.h
     MessageLogWindow.h
@@ -150,7 +168,10 @@ set(${PROJECT_NAME}_HEADERS
     Session.h
     StatsDialog.h
     SystemTrayIcon.h
+    Torrent.h
     TorrentCellRenderer.h
+    TorrentFilter.h
+    TorrentSorter.h
     Utils.h
     ${CMAKE_CURRENT_BINARY_DIR}/transmission-resources.h
     ${CMAKE_CURRENT_BINARY_DIR}/transmission-ui-resources.h
