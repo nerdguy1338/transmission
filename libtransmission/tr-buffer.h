@@ -373,6 +373,13 @@ public:
         return str;
     }
 
+    [[nodiscard]] std::pair<std::byte*, size_t> pullup()
+    {
+        auto const n_bytes = size();
+        auto* const bytes = reinterpret_cast<std::byte*>(evbuffer_pullup(buf_.get(), static_cast<ev_ssize_t>(n_bytes)));
+        return { bytes, n_bytes };
+    }
+
 private:
     evhelpers::evbuffer_unique_ptr buf_{ evbuffer_new() };
 };
