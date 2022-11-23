@@ -365,27 +365,37 @@ struct tr_tier
 
     void useTracker(tr_tracker const* const tracker)
     {
-        if (tracker == nullptr)
+        if (tracker != nullptr)
         {
-            current_tracker_ = nullptr;
-            current_tracker_index_ = 0;
-        }
+            auto const& key = tracker->announce_url;
 
-        auto const& key = tracker->announce_url;
-
-        for (size_t i = 0, n = std::size(trackers); i < n; ++i)
-        {
-            if (key == trackers[i].announce_url)
+            for (size_t i = 0, n = std::size(trackers); i < n; ++i)
             {
-                current_tracker_ = &trackers[i];
-                current_tracker_index_ = i;
-                return;
+                if (key == trackers[i].announce_url)
+                {
+                    current_tracker_ = &trackers[i];
+                    current_tracker_index_ = i;
+                    return;
+                }
             }
         }
+
+        current_tracker_ = nullptr;
+        current_tracker_index_ = 0;
+        return;
     }
 
     tr_tracker* useNextTracker()
     {
+        // reset some of the tier's fields
+        scrapeIntervalSec = DefaultScrapeIntervalSec;
+        announceIntervalSec = DefaultAnnounceIntervalSec;
+        announceMinIntervalSec = DefaultAnnounceMinIntervalSec;
+        isAnnouncing = false;
+        isScraping = false;
+        lastAnnounceStartTime = 0;
+        lastScrapeStartTime = 0;
+
         // move our index to the next tracker in the tier
         if (std::empty(trackers))
         {
@@ -402,15 +412,6 @@ struct tr_tier
             current_tracker_index_ = (current_tracker_index_ + 1) % std::size(trackers);
             current_tracker_ = &trackers[current_tracker_index_];
         }
-
-        // reset some of the tier's fields
-        scrapeIntervalSec = DefaultScrapeIntervalSec;
-        announceIntervalSec = DefaultAnnounceIntervalSec;
-        announceMinIntervalSec = DefaultAnnounceMinIntervalSec;
-        isAnnouncing = false;
-        isScraping = false;
-        lastAnnounceStartTime = 0;
-        lastScrapeStartTime = 0;
 
         return currentTracker();
     }
@@ -540,6 +541,7 @@ struct tr_torrent_announcer
             tier_to_infos[info.tier].emplace_back(&info);
         }
 
+        tiers.reserve(std::size(tier_to_infos));
         for (auto const& tt : tier_to_infos)
         {
             tiers.emplace_back(announcer, tor, tt.second);
