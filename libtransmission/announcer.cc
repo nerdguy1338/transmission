@@ -334,26 +334,14 @@ struct tr_tier
         scrapeSoon();
     }
 
-    [[nodiscard]] tr_tracker* currentTracker()
+    [[nodiscard]] constexpr auto* currentTracker() noexcept
     {
-        if (!current_tracker_index_)
-        {
-            return nullptr;
-        }
-
-        TR_ASSERT(*current_tracker_index_ < std::size(trackers));
-        return &trackers[*current_tracker_index_];
+        return current_tracker_;
     }
 
-    [[nodiscard]] tr_tracker const* currentTracker() const
+    [[nodiscard]] constexpr auto const* currentTracker() const noexcept
     {
-        if (!current_tracker_index_)
-        {
-            return nullptr;
-        }
-
-        TR_ASSERT(*current_tracker_index_ < std::size(trackers));
-        return &trackers[*current_tracker_index_];
+        return current_tracker_;
     }
 
     [[nodiscard]] constexpr bool needsToAnnounce(time_t now) const
@@ -361,18 +349,39 @@ struct tr_tier
         return !isAnnouncing && !isScraping && announceAt != 0 && announceAt <= now && !std::empty(announce_events);
     }
 
-    [[nodiscard]] bool needsToScrape(time_t now) const
+    [[nodiscard]] constexpr bool needsToScrape(time_t now) const
     {
         auto const* const tracker = currentTracker();
 
         return !isScraping && scrapeAt != 0 && scrapeAt <= now && tracker != nullptr && tracker->scrape_info != nullptr;
     }
 
-    [[nodiscard]] auto countDownloaders() const
+    [[nodiscard]] constexpr auto countDownloaders() const
     {
         auto const* const tracker = currentTracker();
 
         return tracker == nullptr ? 0 : tracker->downloader_count + tracker->leecher_count;
+    }
+
+    void useTracker(tr_tracker const* const tracker)
+    {
+        if (tracker == nullptr)
+        {
+            current_tracker_ = nullptr;
+            current_tracker_index_ = 0;
+        }
+
+        auto const& key = tracker->announce_url;
+
+        for (size_t i = 0, n = std::size(trackers); i < n; ++i)
+        {
+            if (key == trackers[i].announce_url)
+            {
+                current_tracker_ = &trackers[i];
+                current_tracker_index_ = i;
+                return;
+            }
+        }
     }
 
     tr_tracker* useNextTracker()
@@ -380,15 +389,18 @@ struct tr_tier
         // move our index to the next tracker in the tier
         if (std::empty(trackers))
         {
-            current_tracker_index_ = std::nullopt;
+            current_tracker_index_ = 0;
+            current_tracker_ = nullptr;
         }
-        else if (!current_tracker_index_)
+        else if (current_tracker_ == nullptr)
         {
             current_tracker_index_ = 0;
+            current_tracker_ = &trackers[current_tracker_index_];
         }
         else
         {
-            current_tracker_index_ = (*current_tracker_index_ + 1) % std::size(trackers);
+            current_tracker_index_ = (current_tracker_index_ + 1) % std::size(trackers);
+            current_tracker_ = &trackers[current_tracker_index_];
         }
 
         // reset some of the tier's fields
@@ -401,19 +413,6 @@ struct tr_tier
         lastScrapeStartTime = 0;
 
         return currentTracker();
-    }
-
-    [[nodiscard]] std::optional<size_t> indexOf(tr_interned_string const& announce_url) const
-    {
-        for (size_t i = 0, n = std::size(trackers); i < n; ++i)
-        {
-            if (announce_url == trackers[i].announce_url)
-            {
-                return i;
-            }
-        }
-
-        return std::nullopt;
     }
 
     [[nodiscard]] std::string buildLogName() const
@@ -461,8 +460,6 @@ struct tr_tier
     std::array<uint64_t, 3> byteCounts = {};
 
     std::vector<tr_tracker> trackers;
-
-    std::optional<size_t> current_tracker_index_;
 
     tr_torrent* const tor;
 
@@ -517,6 +514,9 @@ private:
     }
 
     static inline int next_key = 0;
+
+    tr_tracker* current_tracker_ = nullptr;
+    size_t current_tracker_index_ = 0;
 };
 
 /***
@@ -1714,13 +1714,9 @@ void tr_announcer_impl::resetTorrent(tr_torrent* tor)
                     new_tracker.leecher_count = old_tracker->leecher_count;
                     new_tracker.download_count = old_tracker->download_count;
                     new_tracker.downloader_count = old_tracker->downloader_count;
-
                     new_tier.announce_events = old_tier->announce_events;
                     new_tier.announce_event_priority = old_tier->announce_event_priority;
-
-                    auto const* const old_current = old_tier->currentTracker();
-                    new_tier.current_tracker_index_ = old_current == nullptr ? std::nullopt :
-                                                                               new_tier.indexOf(old_current->announce_url);
+                    new_tier.useTracker(old_tier->currentTracker());
                 }
             }
         }
@@ -1732,7 +1728,7 @@ void tr_announcer_impl::resetTorrent(tr_torrent* tor)
         auto const now = tr_time();
         for (auto& tier : newer->tiers)
         {
-            if (!tier.current_tracker_index_)
+            if (tier.currentTracker() == nullptr)
             {
                 tier.useNextTracker();
                 tier_announce_event_push(&tier, TR_ANNOUNCE_EVENT_STARTED, now);
