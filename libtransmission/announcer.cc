@@ -382,7 +382,6 @@ struct tr_tier
 
         current_tracker_ = nullptr;
         current_tracker_index_ = 0;
-        return;
     }
 
     tr_tracker* useNextTracker()
